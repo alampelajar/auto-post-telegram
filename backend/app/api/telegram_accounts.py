@@ -142,343 +142,48 @@ def ensure_telegram_config() -> None:
 
 
 # ============================================================
-# REQUEST LOGIN CODE
+# LEGACY OTP LOGIN DISABLED
 # ============================================================
 
 @router.post("/connect/request")
-async def request_connection(
-    payload: ConnectRequest,
-):
-    ensure_telegram_config()
-
-    phone = payload.phone_number.strip()
-
-    if not phone:
-        raise HTTPException(
-            status_code=400,
-            detail="Nomor Telegram wajib diisi.",
-        )
-
-    user = await get_or_create_user(
-        payload.telegram_user_id
+async def request_connection(payload: ConnectRequest):
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Login menggunakan kode OTP dinonaktifkan untuk keamanan. "
+            "Gunakan koneksi QR Telegram."
+        ),
     )
-
-    # --------------------------------------------------------
-    # Check existing account
-    # --------------------------------------------------------
-
-    async with SessionLocal() as db:
-        result = await db.execute(
-            select(TelegramAccount).where(
-                TelegramAccount.user_id
-                == user.id,
-                TelegramAccount.phone_number
-                == phone,
-            )
-        )
-
-        existing = result.scalar_one_or_none()
-
-        if (
-            existing is not None
-            and existing.status == "CONNECTED"
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Akun Telegram ini "
-                    "sudah terhubung."
-                ),
-            )
-
-    client = TelegramClient(
-        StringSession(),
-        settings.telegram_api_id,
-        settings.telegram_api_hash,
-    )
-
-    try:
-        await client.connect()
-
-        sent = await client.send_code_request(
-            phone
-        )
-
-        session_string = client.session.save()
-
-        pending_payload = {
-            "user_id": user.id,
-            "phone_number": phone,
-            "phone_code_hash": sent.phone_code_hash,
-            "session": encrypt_session(
-                session_string
-            ),
-            "two_factor_required": False,
-        }
-
-        await redis_client.setex(
-            pending_key(
-                payload.telegram_user_id
-            ),
-            PENDING_TTL,
-            json.dumps(pending_payload),
-        )
-
-        return {
-            "ok": True,
-            "message": (
-                "Kode login Telegram "
-                "sudah dikirim."
-            ),
-            "expires_in": PENDING_TTL,
-        }
-
-    except Exception as exc:
-        logger.exception(
-            "Gagal mengirim kode Telegram"
-        )
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Gagal mengirim kode Telegram: "
-                f"{exc}"
-            ),
-        ) from exc
-
-    finally:
-        await client.disconnect()
 
 
 # ============================================================
-# VERIFY CODE
+# LEGACY OTP VERIFICATION DISABLED
 # ============================================================
 
 @router.post("/connect/verify")
-async def verify_connection(
-    payload: ConnectVerify,
-):
-    ensure_telegram_config()
-
-    raw = await redis_client.get(
-        pending_key(
-            payload.telegram_user_id
-        )
+async def verify_connection(payload: ConnectVerify):
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Login menggunakan kode OTP dinonaktifkan untuk keamanan. "
+            "Gunakan koneksi QR Telegram."
+        ),
     )
-
-    if not raw:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Sesi login tidak ditemukan "
-                "atau sudah kedaluwarsa."
-            ),
-        )
-
-    pending = json.loads(raw)
-
-    session_string = decrypt_session(
-        pending["session"]
-    )
-
-    client = TelegramClient(
-        StringSession(session_string),
-        settings.telegram_api_id,
-        settings.telegram_api_hash,
-    )
-
-    try:
-        await client.connect()
-
-        try:
-            await client.sign_in(
-                phone=pending["phone_number"],
-                code=payload.code,
-                phone_code_hash=pending[
-                    "phone_code_hash"
-                ],
-            )
-
-        except SessionPasswordNeededError:
-            pending["session"] = encrypt_session(
-                client.session.save()
-            )
-
-            pending[
-                "two_factor_required"
-            ] = True
-
-            await redis_client.setex(
-                pending_key(
-                    payload.telegram_user_id
-                ),
-                PENDING_TTL,
-                json.dumps(pending),
-            )
-
-            return {
-                "ok": False,
-                "requires_password": True,
-                "message": (
-                    "Akun menggunakan "
-                    "verifikasi 2 langkah."
-                ),
-            }
-
-        except PhoneCodeInvalidError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail="Kode Telegram tidak valid.",
-            ) from exc
-
-        except PhoneCodeExpiredError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Kode Telegram "
-                    "sudah kedaluwarsa."
-                ),
-            ) from exc
-
-        me = await client.get_me()
-
-        if me is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Gagal mendapatkan "
-                    "profil Telegram."
-                ),
-            )
-
-        account = await save_account(
-            pending,
-            me,
-            client.session.save(),
-        )
-
-        await redis_client.delete(
-            pending_key(
-                payload.telegram_user_id
-            )
-        )
-
-        return {
-            "ok": True,
-            "message": (
-                "Akun Telegram "
-                "berhasil terhubung."
-            ),
-            "account": account,
-        }
-
-    finally:
-        await client.disconnect()
 
 
 # ============================================================
-# VERIFY 2FA
+# LEGACY OTP-BASED 2FA DISABLED
 # ============================================================
 
 @router.post("/connect/2fa")
-async def verify_two_factor(
-    payload: ConnectPassword,
-):
-    ensure_telegram_config()
-
-    raw = await redis_client.get(
-        pending_key(
-            payload.telegram_user_id
-        )
+async def verify_two_factor(payload: ConnectPassword):
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Endpoint 2FA login berbasis OTP dinonaktifkan. "
+            "Mulai koneksi QR Telegram dan gunakan alur verifikasi QR."
+        ),
     )
-
-    if not raw:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Sesi login tidak ditemukan "
-                "atau sudah kedaluwarsa."
-            ),
-        )
-
-    pending = json.loads(raw)
-
-    if not pending.get(
-        "two_factor_required"
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Login tidak sedang "
-                "menunggu password 2FA."
-            ),
-        )
-
-    session_string = decrypt_session(
-        pending["session"]
-    )
-
-    client = TelegramClient(
-        StringSession(session_string),
-        settings.telegram_api_id,
-        settings.telegram_api_hash,
-    )
-
-    try:
-        await client.connect()
-
-        try:
-            await client.sign_in(
-                password=payload.password
-            )
-
-        except Exception as exc:
-            logger.warning(
-                "2FA Telegram gagal: %s",
-                exc,
-            )
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Password 2FA tidak valid."
-                ),
-            ) from exc
-
-        me = await client.get_me()
-
-        if me is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Gagal mendapatkan "
-                    "profil Telegram."
-                ),
-            )
-
-        account = await save_account(
-            pending,
-            me,
-            client.session.save(),
-        )
-
-        await redis_client.delete(
-            pending_key(
-                payload.telegram_user_id
-            )
-        )
-
-        return {
-            "ok": True,
-            "message": (
-                "Akun Telegram "
-                "berhasil terhubung."
-            ),
-            "account": account,
-        }
-
-    finally:
-        await client.disconnect()
 
 
 # ============================================================
