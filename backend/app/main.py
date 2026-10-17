@@ -8,6 +8,7 @@ from app.api.messages import router as messages_router
 from app.api.telegram_accounts import (
     router as telegram_accounts_router,
 )
+from app.api.telegram_qr import router as telegram_qr_router
 from app.core.config import get_settings
 from app.db.session import engine
 
@@ -27,6 +28,10 @@ app = FastAPI(
 
 app.include_router(
     telegram_accounts_router
+)
+
+app.include_router(
+    telegram_qr_router
 )
 
 app.include_router(
