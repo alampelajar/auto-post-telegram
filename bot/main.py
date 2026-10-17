@@ -441,9 +441,24 @@ async def check_qr_login(
     status = data.get("status", "UNKNOWN")
 
     if status == "WAITING":
-        await callback.answer(
-            "Login masih menunggu persetujuan di Telegram."
-        )
+        login_url = data.get("login_url")
+        if login_url:
+            try:
+                await callback.message.edit_reply_markup(
+                    reply_markup=qr_login_keyboard(login_url)
+                )
+                await callback.answer(
+                    "Link login diperbarui. Tekan tombol Buka Telegram."
+                )
+            except Exception:
+                logger.exception("Gagal memperbarui tombol QR login")
+                await callback.answer(
+                    "Login masih menunggu. Coba tekan tombol cek status lagi."
+                )
+        else:
+            await callback.answer(
+                "Login masih menunggu persetujuan di Telegram."
+            )
         return
 
     if status == "REQUIRES_PASSWORD":
