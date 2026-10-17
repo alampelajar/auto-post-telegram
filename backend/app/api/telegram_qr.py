@@ -286,6 +286,9 @@ async def request_qr_connection(payload: QRConnectRequest):
 
     user = await get_or_create_user(bot_user_id)
 
+    # Discard any stale 2FA session from an older QR attempt.
+    await redis_client.delete(session_key(bot_user_id))
+
     client = TelegramClient(
         StringSession(),
         settings.telegram_api_id,
