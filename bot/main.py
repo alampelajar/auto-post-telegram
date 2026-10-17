@@ -349,27 +349,166 @@ async def account_button(
 
 
 # ============================================================
-# CONNECT ACCOUNT
+# CONNECT ACCOUNT WITH TELEGRAM QR LOGIN
 # ============================================================
+
+def qr_login_keyboard(login_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Buka Telegram untuk menyetujui",
+                    url=login_url,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Cek Status Koneksi",
+                    callback_data="check_qr_login",
+                )
+            ],
+        ]
+    )
+
 
 async def start_connect(
     callback: CallbackQuery,
     state: FSMContext,
 ) -> None:
-
     await callback.answer()
+    await state.clear()
 
-    await state.set_state(
-        TelegramConnectState.phone
-    )
+    try:
+        data = await api_request(
+            "POST",
+            "/api/telegram/accounts/connect/qr/request",
+            json={
+                "telegram_user_id": callback.from_user.id,
+            },
+        )
+    except Exception as exc:
+        logger.exception("Gagal membuat QR login Telegram")
+        await callback.message.answer(
+            "❌ Gagal memulai koneksi Telegram.\n\n"
+            f"{exc}"
+        )
+        return
+
+    login_url = data.get("login_url")
+    if not login_url:
+        await callback.message.answer(
+            "❌ Telegram tidak mengembalikan link login. "
+            "Coba mulai koneksi lagi."
+        )
+        return
+
+    expires = data.get("expires_in", 600)
 
     await callback.message.answer(
-        "📱 Hubungkan Akun Telegram\n\n"
-        "Masukkan nomor Telegram dalam "
-        "format internasional.\n\n"
-        "Contoh:\n"
-        "+6281234567890\n\n"
-        "Ketik /cancel untuk membatalkan."
+        "🔐 Hubungkan Akun Telegram\n\n"
+        "1. Tekan tombol untuk membuka aplikasi Telegram.\n"
+        "2. Setujui login hanya jika kamu sendiri yang memulainya.\n"
+        "3. Kembali ke sini dan tekan Cek Status Koneksi.\n\n"
+        "Jangan kirim kode login/OTP ke bot.\n"
+        f"Link berlaku sekitar {expires} detik.",
+        reply_markup=qr_login_keyboard(login_url),
+    )
+
+
+async def check_qr_login(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    try:
+        data = await api_request(
+            "GET",
+            "/api/telegram/accounts/connect/qr/status",
+            params={
+                "telegram_user_id": callback.from_user.id,
+            },
+        )
+    except Exception as exc:
+        logger.exception("Gagal mengecek status QR login")
+        await callback.answer(
+            "Gagal mengecek status koneksi.",
+            show_alert=True,
+        )
+        await callback.message.answer(
+            f"❌ Gagal mengecek status koneksi.\n{exc}"
+        )
+        return
+
+    status = data.get("status", "UNKNOWN")
+
+    if status == "WAITING":
+        await callback.answer(
+            "Login masih menunggu persetujuan di Telegram."
+        )
+        return
+
+    if status == "REQUIRES_PASSWORD":
+        await state.set_state(
+            TelegramConnectState.password
+        )
+        await callback.answer(
+            "Telegram meminta verifikasi 2 langkah."
+        )
+        await callback.message.answer(
+            "🔐 Akun ini memerlukan password verifikasi dua langkah.\n\n"
+            "Kirim password hanya jika kamu memahami bahwa layanan ini "
+            "akan menggunakannya sesaat untuk menyelesaikan login. "
+            "Pesan password akan dihapus segera setelah bot menerimanya.\n\n"
+            "Ketik /cancel untuk membatalkan."
+        )
+        return
+
+    if status == "CONNECTED":
+        account = data.get("account") or {}
+        username = account.get("username")
+        identity = (
+            f"@{username}"
+            if username
+            else account.get("phone_number")
+            or str(account.get("telegram_user_id", "-"))
+        )
+        await state.clear()
+        await callback.answer("Akun berhasil terhubung.")
+        try:
+            await callback.message.edit_text(
+                "✅ Akun Telegram berhasil terhubung!\n\n"
+                f"👤 {identity}\n"
+                "🟢 Status: CONNECTED"
+            )
+        except Exception:
+            await callback.message.answer(
+                "✅ Akun Telegram berhasil terhubung!\n\n"
+                f"👤 {identity}\n"
+                "🟢 Status: CONNECTED"
+            )
+        await callback.message.answer(
+            "Kembali ke menu utama untuk melanjutkan.",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    if status in {"EXPIRED", "FAILED", "CANCELLED", "NOT_FOUND"}:
+        await state.clear()
+        await callback.answer(
+            "Sesi QR sudah tidak aktif.",
+            show_alert=True,
+        )
+        await callback.message.answer(
+            "❌ " + data.get(
+                "message",
+                "Koneksi QR sudah tidak aktif.",
+            ) + "\n\nTekan Akun Telegram lalu Hubungkan Akun untuk mencoba lagi.",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    await callback.answer(
+        "Status koneksi belum dikenali. Coba refresh.",
+        show_alert=True,
     )
 
 
@@ -590,6 +729,16 @@ async def receive_password(
 
     password = message.text or ""
 
+    # Remove the password message from the bot chat immediately.
+    # Never log the password or include it in error messages.
+    try:
+        await message.delete()
+    except Exception:
+        logger.warning(
+            "Could not delete the received 2FA password message immediately."
+        )
+
+
     if not password:
 
         await message.answer(
@@ -606,7 +755,7 @@ async def receive_password(
 
         data = await api_request(
             "POST",
-            "/api/telegram/accounts/connect/2fa",
+            "/api/telegram/accounts/connect/qr/2fa",
             json={
                 "telegram_user_id":
                     message.from_user.id,
@@ -1646,6 +1795,11 @@ async def main() -> None:
     )
 
     dp.callback_query.register(
+        check_qr_login,
+        F.data == "check_qr_login",
+    )
+
+    dp.callback_query.register(
         refresh_accounts,
         F.data == "refresh_accounts",
     )
@@ -1696,16 +1850,7 @@ async def main() -> None:
     # TELEGRAM ACCOUNT FSM
     # ========================================================
 
-    dp.message.register(
-        receive_phone,
-        TelegramConnectState.phone,
-    )
-
-    dp.message.register(
-        receive_code,
-        TelegramConnectState.code,
-    )
-
+    # QR flow no longer asks users to send login codes to the bot.
     dp.message.register(
         receive_password,
         TelegramConnectState.password,
