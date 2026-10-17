@@ -1,4 +1,3 @@
-@'
 .env
 .env.*
 !.env.example
@@ -12,25 +11,26 @@ env/
 .idea/
 .vscode/
 
+# Telegram sessions and local databases
 *.session
 *.session-journal
 *.sqlite
 *.sqlite3
 *.db
 
+# Logs and database backups
 *.log
 *.dump
 *.backup
 *.bak
 *.bak-*
 *.bak.*
-
 backups/
 backup/
 **/backups/
 **/backup/
 
+# Local data directories
 postgres_data/
 redis_data/
 pgdata/
-'@ | Set-Content .gitignore -Encoding utf8
