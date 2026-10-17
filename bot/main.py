@@ -735,9 +735,13 @@ async def receive_password(
         await message.delete()
     except Exception:
         logger.warning(
-            "Could not delete the received 2FA password message immediately."
+            "Could not delete the received 2FA password message; refusing to submit it."
         )
-
+        await message.answer(
+            "❌ Demi keamanan, password tidak dikirim karena pesan tidak berhasil dihapus. "
+            "Pastikan kamu memakai chat pribadi dengan bot, lalu coba lagi."
+        )
+        return
 
     if not password:
 
