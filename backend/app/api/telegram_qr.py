@@ -99,6 +99,7 @@ async def write_status(
     *,
     message: str,
     account: dict | None = None,
+    login_url: str | None = None,
 ) -> None:
     payload = {
         "status": status,
@@ -106,6 +107,8 @@ async def write_status(
     }
     if account is not None:
         payload["account"] = account
+    if login_url is not None and status == "WAITING":
+        payload["login_url"] = login_url
 
     await redis_client.setex(
         status_key(telegram_user_id),
@@ -164,11 +167,54 @@ async def monitor_qr_login(
     client: TelegramClient,
     qr_login,
 ) -> None:
-    try:
-        me = await qr_login.wait(timeout=QR_LOGIN_TTL)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + QR_LOGIN_TTL
 
-        if me is None:
-            me = await client.get_me()
+    try:
+        # Telegram QR login tokens expire quickly (typically ~30 seconds).
+        # Keep wait() active and refresh the link before each token expires.
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                await write_status(
+                    telegram_user_id,
+                    "EXPIRED",
+                    message="Waktu login habis. Mulai koneksi baru.",
+                )
+                return
+
+            try:
+                me = await qr_login.wait(
+                    timeout=min(20.0, remaining)
+                )
+                if me is None:
+                    me = await client.get_me()
+                break
+
+            except asyncio.TimeoutError:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    await write_status(
+                        telegram_user_id,
+                        "EXPIRED",
+                        message="Waktu login habis. Mulai koneksi baru.",
+                    )
+                    return
+
+                await qr_login.recreate()
+                await write_status(
+                    telegram_user_id,
+                    "WAITING",
+                    message=(
+                        "Link login diperbarui. Kembali ke bot "
+                        "dan tekan Cek Status Koneksi untuk mendapatkan link terbaru."
+                    ),
+                    login_url=qr_login.url,
+                )
+                logger.info(
+                    "QR token refreshed for bot_user_id=%s",
+                    telegram_user_id,
+                )
 
         if me is None:
             raise RuntimeError("Telegram tidak mengembalikan profil akun.")
@@ -194,7 +240,7 @@ async def monitor_qr_login(
         )
 
     except SessionPasswordNeededError:
-        # Do not put the password in logs or status payloads.
+        # Keep a short-lived encrypted copy so the user can finish 2FA.
         encrypted_session = encrypt_session(client.session.save())
         await redis_client.setex(
             session_key(telegram_user_id),
@@ -217,13 +263,6 @@ async def monitor_qr_login(
             telegram_user_id,
         )
 
-    except asyncio.TimeoutError:
-        await write_status(
-            telegram_user_id,
-            "EXPIRED",
-            message="QR login kedaluwarsa. Mulai koneksi baru.",
-        )
-
     except asyncio.CancelledError:
         await write_status(
             telegram_user_id,
@@ -241,8 +280,8 @@ async def monitor_qr_login(
             telegram_user_id,
             "FAILED",
             message=(
-                "Koneksi QR gagal. Coba buat QR baru. "
-                "Periksa log API jika masalah berlanjut."
+                "Koneksi QR gagal. Mulai koneksi baru. "
+                "Periksa log API untuk detail teknis; jangan membagikan OTP."
             ),
         )
 
@@ -379,6 +418,10 @@ async def get_qr_status(telegram_user_id: int):
         "status": data.get("status", "UNKNOWN"),
         "message": data.get("message", ""),
     }
+
+    # QR login links are short-lived and must be refreshed regularly.
+    if data.get("status") == "WAITING" and data.get("login_url"):
+        response["login_url"] = data["login_url"]
 
     if data.get("account") is not None:
         response["account"] = data["account"]
