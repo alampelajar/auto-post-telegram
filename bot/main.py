@@ -1,17 +1,21 @@
 import asyncio
+import io
 import logging
 import re
 
 import httpx
+import qrcode
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -352,12 +356,36 @@ async def account_button(
 # CONNECT ACCOUNT WITH TELEGRAM QR LOGIN
 # ============================================================
 
+def make_qr_image(login_url: str) -> BufferedInputFile:
+    """Build a fresh in-memory QR image without writing the login token to disk."""
+    image = qrcode.make(login_url, box_size=8, border=4)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return BufferedInputFile(
+        output.getvalue(),
+        filename="telegram-login-qr.png",
+    )
+
+
+def qr_login_caption() -> str:
+    return (
+        "🔐 Hubungkan Akun Telegram\n\n"
+        "1. Buka chat bot ini di Telegram Desktop/komputer atau layar lain.\n"
+        "2. Di HP yang sudah login ke akun yang ingin dihubungkan, buka "
+        "Pengaturan Telegram → Perangkat → Tautkan Perangkat Desktop / Scan QR.\n"
+        "3. Pindai QR ini dan setujui hanya jika kamu sendiri memulai koneksi.\n"
+        "4. Kembali ke bot dan tekan Cek Status Koneksi.\n\n"
+        "QR cepat kedaluwarsa. Jika QR sudah tidak berlaku, tekan Cek Status "
+        "Koneksi lagi untuk memuat QR terbaru. Jangan bagikan QR ini."
+    )
+
+
 def qr_login_keyboard(login_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Buka Telegram untuk menyetujui",
+                    text="🔗 Buka link (opsional)",
                     url=login_url,
                 )
             ],
@@ -402,15 +430,10 @@ async def start_connect(
         )
         return
 
-    expires = data.get("expires_in", 600)
-
-    await callback.message.answer(
-        "🔐 Hubungkan Akun Telegram\n\n"
-        "1. Tekan tombol untuk membuka aplikasi Telegram.\n"
-        "2. Setujui login hanya jika kamu sendiri yang memulainya.\n"
-        "3. Kembali ke sini dan tekan Cek Status Koneksi.\n\n"
-        "Jangan kirim kode login/OTP ke bot.\n"
-        f"Link berlaku sekitar {expires} detik.",
+    await state.update_data(qr_login_url=login_url)
+    await callback.message.answer_photo(
+        photo=make_qr_image(login_url),
+        caption=qr_login_caption(),
         reply_markup=qr_login_keyboard(login_url),
     )
 
@@ -442,22 +465,41 @@ async def check_qr_login(
 
     if status == "WAITING":
         login_url = data.get("login_url")
-        if login_url:
-            try:
-                await callback.message.edit_reply_markup(
-                    reply_markup=qr_login_keyboard(login_url)
-                )
-                await callback.answer(
-                    "Link login diperbarui. Tekan tombol Buka Telegram."
-                )
-            except Exception:
-                logger.exception("Gagal memperbarui tombol QR login")
-                await callback.answer(
-                    "Login masih menunggu. Coba tekan tombol cek status lagi."
-                )
-        else:
+        if not login_url:
             await callback.answer(
                 "Login masih menunggu persetujuan di Telegram."
+            )
+            return
+
+        state_data = await state.get_data()
+        previous_url = state_data.get("qr_login_url")
+
+        # Avoid editing identical markup/media: Telegram rejects no-op edits.
+        if login_url == previous_url:
+            await callback.answer(
+                "Masih menunggu. Pindai QR dari perangkat lain; "
+                "jika QR kedaluwarsa, cek status lagi sebentar."
+            )
+            return
+
+        try:
+            await callback.message.edit_media(
+                media=InputMediaPhoto(
+                    media=make_qr_image(login_url),
+                    caption=qr_login_caption(),
+                ),
+                reply_markup=qr_login_keyboard(login_url),
+            )
+            await state.update_data(qr_login_url=login_url)
+            await callback.answer(
+                "QR diperbarui. Pindai dari aplikasi Telegram di perangkat lain."
+            )
+        except Exception:
+            logger.exception("Gagal memperbarui gambar QR login")
+            await callback.answer(
+                "QR terbaru tersedia tetapi gambar gagal diperbarui. "
+                "Mulai koneksi baru dari menu Akun Telegram.",
+                show_alert=True,
             )
         return
 
@@ -489,10 +531,13 @@ async def check_qr_login(
         await state.clear()
         await callback.answer("Akun berhasil terhubung.")
         try:
-            await callback.message.edit_text(
-                "✅ Akun Telegram berhasil terhubung!\n\n"
-                f"👤 {identity}\n"
-                "🟢 Status: CONNECTED"
+            await callback.message.edit_caption(
+                caption=(
+                    "✅ Akun Telegram berhasil terhubung!\n\n"
+                    f"👤 {identity}\n"
+                    "🟢 Status: CONNECTED"
+                ),
+                reply_markup=None,
             )
         except Exception:
             await callback.message.answer(
