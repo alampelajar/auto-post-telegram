@@ -9,3 +9,4 @@ pydantic-settings==2.15.0
 alembic>=1.16,<2
 cryptography
 httpx
+qrcode[pil]==8.2
